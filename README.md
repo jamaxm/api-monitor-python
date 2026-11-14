@@ -1,152 +1,200 @@
-# Public API Monitor — Python, PostgreSQL, GitHub Actions
+# Public API Monitor — FakerAPI, Python, PostgreSQL, GitHub Actions
 
-Небольшой сервис мониторинга открытого REST API. Приложение сразу после запуска делает HTTP GET-запрос, а затем повторяет его с интервалом `INTERVAL_SECONDS`. Результаты записываются в PostgreSQL: время, URL, HTTP-статус, длительность, JSON-ответ или ошибка.
+Небольшой сервис для периодического сбора синтетических данных из [FakerAPI](https://fakerapi.it/en) с сохранением истории запросов и структурированных записей в PostgreSQL.
 
-## Стек
+## Что делает приложение
 
-- Python 3 и `requests` для HTTP.
-- `psycopg` для PostgreSQL.
-- `systemd` для постоянной работы сервиса на Ubuntu.
-- GitHub Actions для CI и доставки релизов по SSH.
+- Каждые 900 секунд по умолчанию вызывает выбранные endpoints FakerAPI.
+- Сохраняет каждый запуск в таблицу api_sync_runs, а каждый HTTP-вызов и очищенный JSON-ответ — в api_request_logs.
+- Разбирает восемь ресурсов в отдельные таблицы: faker_addresses, faker_books, faker_companies, faker_persons, faker_places, faker_products, faker_texts и faker_users.
+- Сохраняет обычные поля в типизированные столбцы, а вложенные массивы и объекты (например, адреса компании, изображения и категории товара) — в JSONB.
+- Записывает каждый набор данных под своим sync_run_id. ID от API могут повторяться в следующих ответах, поэтому не считаются глобально уникальными.
+- Не сохраняет поле password из ресурса users; из JSON-логов рекурсивно удаляются поля password/token/secret-подобного типа.
+- Продолжает обработку при ошибке одного endpoint: ошибка сохраняется в журнале, а запуск получает статус success, partial_failure или failed.
 
-## 1. Создай PostgreSQL-базу
+FakerAPI не требует регистрации или API-ключа. Общие параметры _quantity (1–1000), _locale и _seed описаны в [официальной документации](https://fakerapi.it/en). Это синтетические тестовые данные, а не реальные бизнес-данные.
 
-На сервере:
+## Текущее состояние базы
 
-```bash
-sudo -u postgres psql
-```
+База api_monitor и роль api_monitor_app уже созданы на сервере. Повторять SQL-команды создания базы или роли не надо. При первом старте приложение создаёт таблицы, если их ещё нет.
 
-В консоли PostgreSQL:
+## 1. Подготовка сервера (один раз)
 
-```sql
-CREATE ROLE api_monitor_app LOGIN;
-\password api_monitor_app
-CREATE DATABASE api_monitor OWNER api_monitor_app ENCODING 'UTF8' TEMPLATE template0;
-\q
-```
+Скачай ZIP-архив репозитория или клонируй его на свой компьютер:
 
-Введи надёжный пароль по запросу команды `\password`. Если роль или база уже созданы, не выполняй `CREATE` повторно.
+~~~bash
+git clone https://github.com/jamaxm/api-monitor-python.git
+cd api-monitor-python
+~~~
 
-## 2. Подготовь сервер (один раз)
+Если репозиторий приватный и clone по HTTPS не настроен, скачай ZIP через GitHub → Code → Download ZIP.
 
-Скопируй эти три файла в одну временную папку сервера: `api-monitor.service`, `scripts/deploy-api-monitor.sh`, `scripts/bootstrap-server.sh`. Например, со своего компьютера:
+Из корневой папки проекта передай на сервер три файла (замени SERVER_IP):
 
-```bash
+~~~bash
 scp api-monitor.service scripts/deploy-api-monitor.sh scripts/bootstrap-server.sh ubuntu@SERVER_IP:/tmp/
+~~~
+
+Подключись к Ubuntu:
+
+~~~bash
 ssh ubuntu@SERVER_IP
-```
+~~~
 
-На сервере:
+Выполни:
 
-```bash
+~~~bash
 sudo mkdir -p /tmp/api-monitor-bootstrap
 sudo install -m 0644 /tmp/api-monitor.service /tmp/api-monitor-bootstrap/api-monitor.service
 sudo install -m 0750 /tmp/deploy-api-monitor.sh /tmp/api-monitor-bootstrap/deploy-api-monitor.sh
 sudo install -m 0750 /tmp/bootstrap-server.sh /tmp/api-monitor-bootstrap/bootstrap-server.sh
 sudo bash /tmp/api-monitor-bootstrap/bootstrap-server.sh
-```
+~~~
 
-Укажи своего SSH-пользователя и публичный IP вместо `ubuntu` и `SERVER_IP`. Скрипт создаст системных пользователей `api-monitor` и `api-deploy`, установит systemd unit и ограниченное sudo-правило для скрипта деплоя.
+Скрипт установит Python/venv, создаст системного пользователя приложения api-monitor и отдельного SSH-пользователя деплоя api-deploy, установит systemd unit и ограниченное sudo-правило для deploy-скрипта.
 
-Настрой файл окружения сервиса:
+## 2. Настройка PostgreSQL и сборщика
 
-```bash
+Открой конфигурацию на сервере:
+
+~~~bash
 sudo nano /etc/api-monitor.env
-```
+~~~
 
-Поля должны соответствовать созданной PostgreSQL-базе:
+Укажи пароль, который ты задал роли api_monitor_app при создании базы. Пароль не нужно добавлять в GitHub или исходники.
 
-```ini
+~~~ini
 DB_HOST=127.0.0.1
 DB_PORT=5432
 DB_NAME=api_monitor
 DB_USER=api_monitor_app
-DB_PASSWORD=ВСТАВЬ_СОЗДАННЫЙ_ПАРОЛЬ
-API_URL=https://jsonplaceholder.typicode.com/posts/1
-INTERVAL_SECONDS=300
+DB_PASSWORD=ВСТАВЬ_СВОЙ_ПАРОЛЬ
+
+FAKERAPI_BASE_URL=https://fakerapi.it/api/v1
+API_RESOURCES=addresses,books,companies,persons,places,products,texts,users
+API_QUANTITY=5
+API_LOCALE=en_US
+API_SEED=
+INTERVAL_SECONDS=900
 REQUEST_TIMEOUT_SECONDS=20
-```
+~~~
 
-Затем:
+Оставь API_SEED пустым, чтобы запрашивать новые сгенерированные наборы. Если задашь целое число, FakerAPI рассчитан на повторяемый результат для того же seed. Запросы выполняются последовательно, по одному на каждый ресурс.
 
-```bash
+Сохрани файл (Ctrl+O, Enter, Ctrl+X) и выставь права:
+
+~~~bash
 sudo chown root:root /etc/api-monitor.env
 sudo chmod 600 /etc/api-monitor.env
-```
+~~~
 
-Не сохраняй этот файл в Git.
+Таблицы вручную создавать не надо: приложение создаст их при запуске, используя пользователя api_monitor_app.
 
 ## 3. Настрой SSH для GitHub Actions
 
-Создай отдельную пару ключей на своём компьютере (не используй личный административный ключ):
+Создай на своём компьютере отдельную пару ключей только для этого проекта. Не используй личный административный ключ.
 
-```bash
-ssh-keygen -t ed25519 -C "github-actions-api-monitor" -f ~/.ssh/api-monitor-github-actions
-```
+Windows PowerShell:
 
-Приватный ключ — `api-monitor-github-actions`; публичный — `api-monitor-github-actions.pub`. Для автоматического подключения приватный ключ обычно создают без passphrase и хранят только в GitHub Secrets.
+~~~powershell
+ssh-keygen -t ed25519 -C "github-actions-api-monitor" -f "$env:USERPROFILE\.ssh\api-monitor-github-actions"
+~~~
 
-Установи публичный ключ для пользователя `api-deploy` на сервере. Например, из PowerShell:
+Для автоматического подключения приватный ключ без passphrase хранится только в GitHub Secrets. Публичный ключ нужно установить для пользователя api-deploy.
 
-```powershell
+Из PowerShell скопируй публичный ключ на сервер:
+
+~~~powershell
 scp "$env:USERPROFILE\.ssh\api-monitor-github-actions.pub" ubuntu@SERVER_IP:/tmp/api-monitor-github-actions.pub
+~~~
+
+Затем:
+
+~~~powershell
 ssh ubuntu@SERVER_IP "sudo install -o api-deploy -g api-deploy -m 0600 /tmp/api-monitor-github-actions.pub /home/api-deploy/.ssh/authorized_keys && sudo rm -f /tmp/api-monitor-github-actions.pub"
-```
+~~~
 
-Полученный пользователь имеет право запускать через sudo только ограниченный deploy-скрипт.
+### Проверка SSH host key
 
-Для безопасной проверки SSH host key сравни отпечаток ключа сервера и только после проверки добавь host key в GitHub Secret `DEPLOY_KNOWN_HOSTS`:
+На сервере получи отпечаток ключа:
 
-```bash
+~~~bash
 sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
-ssh-keyscan -H -t ed25519 SERVER_IP 2>/dev/null
-```
+~~~
 
-Сверь fingerprints из доверенного источника/на самом сервере; не отключай `StrictHostKeyChecking`.
+В локальном PowerShell выполни:
+
+~~~powershell
+ssh-keyscan -t ed25519 SERVER_IP 2>$null | ForEach-Object { $parts = $_ -split ' '; "$($parts[1]) $($parts[2])" } | ssh-keygen -lf -
+~~~
+
+Продолжай только если SHA256-отпечатки совпали. Затем получи строку known_hosts:
+
+~~~powershell
+ssh-keyscan -H -t ed25519 SERVER_IP 2>$null
+~~~
+
+Скопируй её для GitHub Secret. Не отключай проверку host key.
 
 ## 4. GitHub Secrets
 
-В репозитории открой **Settings → Secrets and variables → Actions** и добавь:
+В репозитории открой Settings → Secrets and variables → Actions:  
+https://github.com/jamaxm/api-monitor-python/settings/secrets/actions
+
+Добавь:
 
 | Secret | Значение |
 |---|---|
-| `DEPLOY_HOST` | Публичный IP или DNS сервера |
-| `DEPLOY_PORT` | SSH-порт (необязательно, по умолчанию 22) |
-| `DEPLOY_USER` | `api-deploy` |
-| `DEPLOY_SSH_KEY` | Полный текст приватного ключа |
-| `DEPLOY_KNOWN_HOSTS` | Проверенная строка host key |
+| DEPLOY_HOST | Публичный IP/DNS Ubuntu-сервера |
+| DEPLOY_USER | api-deploy |
+| DEPLOY_SSH_KEY | Полное содержимое приватного файла api-monitor-github-actions (без .pub) |
+| DEPLOY_KNOWN_HOSTS | Проверенная строка known_hosts |
+| DEPLOY_PORT | Необязательно; по умолчанию 22 |
 
-Workflow запускает проверки на pull request. После успешной проверки push в `main` выполняет деплой.
+Не публикуй приватный ключ и пароль БД в чате, исходниках или логах workflow.
 
-## 5. Как проходит деплой
+Убедись, что правило OCI Security List/NSG и firewall Ubuntu допускают SSH с GitHub-hosted runner. Не открывай PostgreSQL 5432 для интернета. Если SSH доступен только с твоего IP, runner не сможет подключиться: используй runner с контролируемым исходящим IP или VPN.
 
-1. GitHub Actions устанавливает зависимости, проверяет синтаксис, запускает unit-тесты и `pip check`.
-2. По SSH отправляет `main.py` и `requirements.txt` в каталог пользователя деплоя.
-3. На сервере создаётся отдельный release в `/opt/api-monitor/releases/` и виртуальное окружение.
-4. Переключается симлинк `/opt/api-monitor/current`, после чего перезапускается `systemd`.
-5. Если сервис не стартует, скрипт пытается восстановить предыдущую версию. Хранятся пять последних релизов.
+## 5. Как проходит CI/CD
 
-Для первого запуска GitHub Secrets должны быть заполнены, а bootstrap сервера завершён. Секреты не следует передавать через коммиты, workflow output или обычные файлы репозитория.
+Файл .github/workflows/deploy.yml запускает CI на Pull Request и push в main: установка зависимостей, компиляция, unit-тесты и pip check. После успешного push в main workflow по SSH отправляет код на сервер, создаёт релиз, устанавливает зависимости в виртуальное окружение, переключает current и перезапускает systemd. Если сервис не активируется, deploy-скрипт пытается вернуть предыдущий релиз. Хранятся пять последних релизов.
 
-## 6. Проверка
+## 6. Проверка после деплоя
 
-```bash
-sudo systemctl status api-monitor
+На сервере:
+
+~~~bash
+sudo systemctl status api-monitor --no-pager
 sudo journalctl -u api-monitor -n 100 --no-pager
-```
+~~~
 
-Записи в PostgreSQL:
+Посмотри последние запуски сбора:
 
-```bash
-psql -h 127.0.0.1 -U api_monitor_app -d api_monitor -W
-```
+~~~bash
+sudo -u postgres psql -d api_monitor -c "
+SELECT id, started_at, finished_at, status,
+       resources_succeeded, resources_failed
+FROM api_sync_runs
+ORDER BY id DESC
+LIMIT 10;"
+~~~
 
-```sql
-SELECT id, checked_at, api_url, http_status, duration_ms, error_message
+Посмотри HTTP-вызовы:
+
+~~~bash
+sudo -u postgres psql -d api_monitor -c "
+SELECT sync_run_id, resource, http_status, duration_ms, error_message, checked_at
 FROM api_request_logs
 ORDER BY id DESC
-LIMIT 20;
-```
+LIMIT 20;"
+~~~
 
-PostgreSQL слушать в интернете не требуется: приложение подключается к нему через `127.0.0.1`.
+Посмотри сохранённые данные:
+
+~~~bash
+sudo -u postgres psql -d api_monitor -c "SELECT count(*) FROM faker_users;"
+sudo -u postgres psql -d api_monitor -c "SELECT id, sync_run_id, firstname, lastname, email FROM faker_persons ORDER BY id DESC LIMIT 10;"
+sudo -u postgres psql -d api_monitor -c "SELECT id, sync_run_id, name, price, categories FROM faker_products ORDER BY id DESC LIMIT 10;"
+~~~
+
+Первый запуск создаёт схему и выполняет запросы к выбранным ресурсам. Каждый следующий запуск получает новый sync_run_id, поэтому историю загрузок можно анализировать. Если объём данных станет слишком большим, уменьши список ресурсов/число строк или увеличь INTERVAL_SECONDS.
