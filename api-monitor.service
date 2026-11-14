@@ -1,0 +1,25 @@
+[Unit]
+Description=Public API Monitor
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=api-monitor
+Group=api-monitor
+WorkingDirectory=/opt/api-monitor/current
+EnvironmentFile=/etc/api-monitor.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/api-monitor/current/.venv/bin/python /opt/api-monitor/current/main.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
