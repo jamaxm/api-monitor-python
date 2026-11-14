@@ -93,7 +93,7 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             -p "$DEPLOY_PORT" \
-            "$DEPLOY_USER@$DEPLOY_HOST" 'test -x /usr/local/sbin/deploy-api-monitor'
+            "$DEPLOY_USER@$DEPLOY_HOST" 'set +e; sudo -n /usr/local/sbin/deploy-api-monitor >/dev/null 2>&1; rc=$?; test "$rc" -eq 2'
 
       - name: Upload release files
         shell: bash
