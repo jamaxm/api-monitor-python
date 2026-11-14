@@ -78,9 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           install -d -m 0700 "$HOME/.ssh"
-          printf '%s\\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
           chmod 0600 "$HOME/.ssh/deploy_key"
-          printf '%s\\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 0600 "$HOME/.ssh/known_hosts"
           test -s "$HOME/.ssh/known_hosts"
 
@@ -88,38 +88,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ssh -i "$HOME/.ssh/deploy_key" \\
-            -o IdentitiesOnly=yes \\
-            -o BatchMode=yes \\
-            -o StrictHostKeyChecking=yes \\
-            -p "$DEPLOY_PORT" \\
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -p "$DEPLOY_PORT" \
             "$DEPLOY_USER@$DEPLOY_HOST" 'test -x /usr/local/sbin/deploy-api-monitor'
 
       - name: Upload release files
         shell: bash
         run: |
           set -euo pipefail
-          scp -i "$HOME/.ssh/deploy_key" \\
-            -o IdentitiesOnly=yes \\
-            -o BatchMode=yes \\
-            -o StrictHostKeyChecking=yes \\
-            -P "$DEPLOY_PORT" \\
+          scp -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -P "$DEPLOY_PORT" \
             main.py "$DEPLOY_USER@$DEPLOY_HOST:/home/api-deploy/deploy/api-monitor-main.py"
-          scp -i "$HOME/.ssh/deploy_key" \\
-            -o IdentitiesOnly=yes \\
-            -o BatchMode=yes \\
-            -o StrictHostKeyChecking=yes \\
-            -P "$DEPLOY_PORT" \\
+          scp -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -P "$DEPLOY_PORT" \
             requirements.txt "$DEPLOY_USER@$DEPLOY_HOST:/home/api-deploy/deploy/api-monitor-requirements.txt"
 
       - name: Deploy and restart systemd service
         shell: bash
         run: |
           set -euo pipefail
-          ssh -i "$HOME/.ssh/deploy_key" \\
-            -o IdentitiesOnly=yes \\
-            -o BatchMode=yes \\
-            -o StrictHostKeyChecking=yes \\
-            -p "$DEPLOY_PORT" \\
-            "$DEPLOY_USER@$DEPLOY_HOST" \\
+          ssh -i "$HOME/.ssh/deploy_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -p "$DEPLOY_PORT" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
             "sudo /usr/local/sbin/deploy-api-monitor /home/api-deploy/deploy/api-monitor-main.py /home/api-deploy/deploy/api-monitor-requirements.txt '$RELEASE_ID'"
