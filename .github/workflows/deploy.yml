@@ -1,0 +1,125 @@
+name: CI/CD - Public API Monitor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Validate Python application
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m compileall -q main.py tests
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check dependency consistency
+        run: python -m pip check
+
+  deploy:
+    name: Deploy to production
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: api-monitor-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      RELEASE_ID: "${{ github.sha }}-${{ github.run_id }}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required secret is missing: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$DEPLOY_PORT" =~ ^[0-9]+$ ]]; then
+            echo "DEPLOY_PORT must be numeric" >&2
+            exit 1
+          fi
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy_key"
+          chmod 0600 "$HOME/.ssh/deploy_key"
+          printf '%s\\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+          test -s "$HOME/.ssh/known_hosts"
+
+      - name: Verify SSH connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" \\
+            -o IdentitiesOnly=yes \\
+            -o BatchMode=yes \\
+            -o StrictHostKeyChecking=yes \\
+            -p "$DEPLOY_PORT" \\
+            "$DEPLOY_USER@$DEPLOY_HOST" 'test -x /usr/local/sbin/deploy-api-monitor'
+
+      - name: Upload release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -i "$HOME/.ssh/deploy_key" \\
+            -o IdentitiesOnly=yes \\
+            -o BatchMode=yes \\
+            -o StrictHostKeyChecking=yes \\
+            -P "$DEPLOY_PORT" \\
+            main.py "$DEPLOY_USER@$DEPLOY_HOST:/home/api-deploy/deploy/api-monitor-main.py"
+          scp -i "$HOME/.ssh/deploy_key" \\
+            -o IdentitiesOnly=yes \\
+            -o BatchMode=yes \\
+            -o StrictHostKeyChecking=yes \\
+            -P "$DEPLOY_PORT" \\
+            requirements.txt "$DEPLOY_USER@$DEPLOY_HOST:/home/api-deploy/deploy/api-monitor-requirements.txt"
+
+      - name: Deploy and restart systemd service
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" \\
+            -o IdentitiesOnly=yes \\
+            -o BatchMode=yes \\
+            -o StrictHostKeyChecking=yes \\
+            -p "$DEPLOY_PORT" \\
+            "$DEPLOY_USER@$DEPLOY_HOST" \\
+            "sudo /usr/local/sbin/deploy-api-monitor /home/api-deploy/deploy/api-monitor-main.py /home/api-deploy/deploy/api-monitor-requirements.txt '$RELEASE_ID'"
